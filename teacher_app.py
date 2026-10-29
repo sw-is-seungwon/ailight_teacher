@@ -1,14 +1,17 @@
-import re
-from collections import Counter
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
+
 import streamlit as st
 import requests
 import pandas as pd
 import plotly.graph_objects as go
 import hmac
+import re
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from pathlib import Path
+
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
 
 # ==========================================
 # 1. 기본 설정
@@ -36,14 +39,14 @@ EMOJI = {
 }
 
 # ==========================================
-# 2. 파스텔톤 디자인
+# 2. 디자인
 # ==========================================
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Gowun+Dodum&display=swap');
 
-html, body, button, input, p,
+html, body, button, input, p, textarea,
 [data-testid="stAppViewContainer"],
 [data-testid="stMarkdownContainer"] {
     font-family: 'Gowun Dodum', sans-serif !important;
@@ -82,7 +85,6 @@ html, body, button, input, p,
     margin: 20px 0;
 }
 
-/* 버튼 */
 div.stButton > button,
 div.stFormSubmitButton > button {
     font-family: 'Gowun Dodum', sans-serif !important;
@@ -95,7 +97,6 @@ div.stFormSubmitButton > button {
     font-weight: bold;
 }
 
-/* 새로고침 버튼 */
 .st-key-refresh_button button {
     background: #d5edff !important;
     color: #4c6b92 !important;
@@ -104,7 +105,6 @@ div.stFormSubmitButton > button {
     font-size: 18px !important;
 }
 
-/* 평가 통계 카드 */
 .stat {
     border-radius: 18px;
     padding: 20px;
@@ -140,9 +140,12 @@ div.stFormSubmitButton > button {
     margin: 15px;
 }
 
-/* 평가 이유 카드 */
-div[data-testid="stVerticalBlockBorderWrapper"] {
-    border-radius: 16px;
+.wordcloud-area {
+    background: #ffffff;
+    border: 2px solid #eedced;
+    border-radius: 20px;
+    padding: 12px;
+    margin: 15px 0;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -164,11 +167,10 @@ if "load_error" not in st.session_state:
     st.session_state.load_error = ""
 
 # ==========================================
-# 4. Google Sheets 결과 조회
+# 4. Google Sheets 조회
 # ==========================================
 
 def load_results():
-    """Apps Script로 평가 결과 조회"""
 
     payload = {
         "action": "read",
@@ -207,19 +209,30 @@ def load_results():
     if df.empty:
         return df
 
-    # 데이터 형식 확인
     df["평가조"] = pd.to_numeric(
         df["평가조"],
         errors="coerce"
     )
 
-    # 정상 평가만 추출
+    df["평가"] = (
+        df["평가"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    df["이유"] = (
+        df["이유"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
     df = df[
         df["평가조"].isin(GROUPS)
         & df["평가"].isin(ANSWERS)
     ].copy()
 
-    # 중복 응답 방지
     df = df.drop_duplicates(
         subset=["참여ID", "평가조"],
         keep="last"
@@ -229,7 +242,6 @@ def load_results():
 
 
 def refresh_results():
-    """Google Sheets 데이터를 수동으로 다시 조회"""
 
     try:
         df = load_results()
@@ -244,27 +256,199 @@ def refresh_results():
 
         st.session_state.load_error = ""
 
-    except Exception:
-        # 오류가 나면 기존 결과 유지
+    except Exception as e:
+
         st.session_state.load_error = (
             "평가 결과를 불러오지 못했습니다. "
-            "잠시 후 다시 시도해 주세요."
+            f"오류: {e}"
         )
 
 # ==========================================
-# 5. 교사용 로그인
+# 5. 워드클라우드 함수
+# ==========================================
+
+# 한글 분석에 적합하지 않은 일반 표현 제거
+STOPWORDS = {
+    "그리고", "그러나", "하지만",
+    "그래서", "때문에", "따라서",
+    "있어요", "있습니다", "없어요",
+    "없습니다", "있다", "없다",
+    "같아요", "같습니다", "생각합니다",
+    "생각해요", "것이다", "것을",
+    "것은", "것이", "저는", "제가",
+    "너무", "정말", "매우",
+    "조금", "많이", "위해",
+    "대한", "이러한", "그러한",
+    "서비스", "인공지능",
+    "사용할", "사용하는", "사용하고",
+    "있을", "없는", "하는",
+    "있기", "때문", "한다",
+    "된다", "해야", "같은",
+    "그리고", "이것", "저것"
+}
+
+# 자주 등장하는 표현 통합
+WORD_REPLACE = {
+    "개인정보가": "개인정보",
+    "개인정보를": "개인정보",
+    "개인정보의": "개인정보",
+    "안전성이": "안전성",
+    "안전성을": "안전성",
+    "정확성이": "정확성",
+    "정확성을": "정확성",
+    "공정성이": "공정성",
+    "공정성을": "공정성",
+    "신뢰성이": "신뢰성",
+    "신뢰성을": "신뢰성",
+    "편리해서": "편리함",
+    "편리하고": "편리함",
+    "편리하다": "편리함",
+    "위험해서": "위험",
+    "위험하다": "위험",
+    "보완해야": "보완",
+    "보완하면": "보완",
+    "오류가": "오류",
+    "오류를": "오류"
+}
+
+
+def extract_words(texts):
+    """학생 평가 이유에서 단어 추출"""
+
+    words = []
+
+    for text in texts:
+
+        text = str(text).strip()
+
+        # 한글, 영어, 숫자 중 두 글자 이상의 단어
+        tokens = re.findall(
+            r"[가-힣A-Za-z0-9]{2,}",
+            text
+        )
+
+        for token in tokens:
+
+            token = token.lower()
+
+            # 표현 통합
+            token = WORD_REPLACE.get(
+                token, token
+            )
+
+            if token in STOPWORDS:
+                continue
+
+            words.append(token)
+
+    return Counter(words)
+
+
+def find_korean_font():
+    """Streamlit 서버에서 한글 폰트 찾기"""
+
+    candidates = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
+        "C:/Windows/Fonts/malgun.ttf"
+    ]
+
+    for path in candidates:
+        if Path(path).is_file():
+            return path
+
+    # 설치 위치가 다른 경우 검색
+    font_root = Path("/usr/share/fonts")
+
+    if font_root.exists():
+        for pattern in [
+            "**/NanumGothic.ttf",
+            "**/NanumBarunGothic.ttf",
+            "**/NotoSansCJK-Regular.ttc"
+        ]:
+            matches = list(
+                font_root.glob(pattern)
+            )
+
+            if matches:
+                return str(matches[0])
+
+    return None
+
+
+def make_wordcloud(frequencies):
+
+    font_path = find_korean_font()
+
+    if font_path is None:
+        st.warning(
+            "한글 폰트가 설치되어 있지 않습니다. "
+            "GitHub에 packages.txt 파일을 추가하고 "
+            "fonts-nanum을 입력해 주세요."
+        )
+        return
+
+    try:
+        wc = WordCloud(
+            font_path=font_path,
+            width=1100,
+            height=550,
+            background_color="#fffaff",
+            max_words=50,
+            colormap="Set2",
+            prefer_horizontal=0.95,
+            random_state=42,
+            collocations=False,
+            margin=8
+        )
+
+        wc.generate_from_frequencies(
+            frequencies
+        )
+
+        fig, ax = plt.subplots(
+            figsize=(12, 6)
+        )
+
+        ax.imshow(
+            wc,
+            interpolation="bilinear"
+        )
+
+        ax.axis("off")
+
+        fig.patch.set_facecolor("#fffaff")
+
+        st.pyplot(
+            fig,
+            use_container_width=True
+        )
+
+        plt.close(fig)
+
+    except Exception as e:
+        st.error(
+            "워드클라우드 생성 중 오류가 발생했습니다."
+        )
+        st.caption(str(e))
+
+
+# ==========================================
+# 6. 로그인
 # ==========================================
 
 def login(password):
-    correct = st.secrets["teacher_password"]
 
     return hmac.compare_digest(
         password,
-        correct
+        st.secrets["teacher_password"]
     )
 
 
 def logout():
+
     st.session_state.authenticated = False
     st.session_state.results_data = None
     st.session_state.last_updated = None
@@ -287,9 +471,7 @@ if not st.session_state.authenticated:
         unsafe_allow_html=True
     )
 
-    left, center, right = st.columns(
-        [1, 2, 1]
-    )
+    left, center, right = st.columns([1, 2, 1])
 
     with center:
 
@@ -308,9 +490,9 @@ if not st.session_state.authenticated:
         if submitted:
 
             if login(password):
+
                 st.session_state.authenticated = True
 
-                # 최초 로그인할 때 한 번 조회
                 with st.spinner(
                     "🌷 평가 결과를 불러오고 있어요..."
                 ):
@@ -326,7 +508,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ==========================================
-# 6. 교사용 메인 화면
+# 7. 메인 화면
 # ==========================================
 
 st.markdown(
@@ -369,7 +551,7 @@ with right:
 st.write("")
 
 # ==========================================
-# 7. 수동 새로고침
+# 8. 수동 새로고침
 # ==========================================
 
 if st.button(
@@ -395,19 +577,17 @@ if st.session_state.last_updated:
 st.divider()
 
 # ==========================================
-# 8. 평가 결과 대시보드
+# 9. 평가 결과 집계
 # ==========================================
 
 if st.session_state.results_data is None:
 
     st.info(
-        "평가 결과를 불러오지 못했어요. "
-        "위의 새로고침 버튼을 눌러 주세요."
+        "데이터가 없습니다. 새로고침 버튼을 눌러 주세요."
     )
 
     st.stop()
 
-# 저장된 데이터를 사용
 df = st.session_state.results_data
 
 group_df = df[
@@ -423,10 +603,6 @@ counts = {
     for answer in ANSWERS
 }
 
-# ------------------------------------------
-# 1. 조별 평가 현황
-# ------------------------------------------
-
 st.markdown(
     f'<div class="section-title">'
     f'🌼 {selected_group}조 평가 현황'
@@ -439,9 +615,9 @@ st.metric(
     f"{total}명"
 )
 
-# ------------------------------------------
-# 2. 가능 / 제한 / 금지 집계
-# ------------------------------------------
+# ==========================================
+# 10. 가능 / 제한 / 금지
+# ==========================================
 
 cols = st.columns(3)
 
@@ -459,7 +635,7 @@ for col, answer, css_name in zip(
 
     percent = (
         number / total * 100
-        if total > 0 else 0
+        if total else 0
     )
 
     with col:
@@ -479,9 +655,9 @@ for col, answer, css_name in zip(
 
 st.write("")
 
-# ------------------------------------------
-# 3. 신호등 평가 원그래프
-# ------------------------------------------
+# ==========================================
+# 11. 원그래프
+# ==========================================
 
 if total == 0:
 
@@ -492,12 +668,12 @@ if total == 0:
 else:
 
     labels = [
-        answer for answer in ANSWERS
-        if counts[answer] > 0
+        a for a in ANSWERS
+        if counts[a] > 0
     ]
 
     values = [
-        counts[answer] for answer in labels
+        counts[a] for a in labels
     ]
 
     fig = go.Figure(
@@ -506,21 +682,17 @@ else:
             values=values,
             hole=0.4,
             sort=False,
-
             marker=dict(
                 colors=[
-                    COLORS[answer]
-                    for answer in labels
+                    COLORS[a] for a in labels
                 ],
                 line=dict(
                     color="white",
                     width=3
                 )
             ),
-
             textinfo="label+percent",
             textfont=dict(size=17),
-
             hovertemplate=(
                 "%{label}: %{value}명"
                 "<extra></extra>"
@@ -529,31 +701,25 @@ else:
     )
 
     fig.update_layout(
-
         title=dict(
             text=f"{selected_group}조 신호등 평가 비율",
             x=0.5
         ),
-
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-
         height=420,
-
         margin=dict(
             l=20,
             r=20,
             t=60,
             b=20
         ),
-
         annotations=[
             dict(
                 text=f"{total}명",
                 x=0.5,
                 y=0.5,
                 showarrow=False,
-
                 font=dict(
                     size=24,
                     color="#65536d"
@@ -565,22 +731,19 @@ else:
     st.plotly_chart(
         fig,
         use_container_width=True,
-        config={
-            "displayModeBar": False
-        }
+        config={"displayModeBar": False}
     )
 
 st.divider()
 
 # ==========================================
-# 9. 학생 평가 이유
+# 12. 평가 이유 필터
 # ==========================================
 
 st.markdown(
     "### 💬 학생들이 작성한 평가 이유"
 )
 
-# 평가 유형 필터
 answer_filter = st.selectbox(
     "평가 유형",
     ["전체", "가능", "제한", "금지"],
@@ -597,91 +760,78 @@ else:
         group_df["평가"] == answer_filter
     ].copy()
 
+# 실제 문장이 있는 응답만 추출
+valid_reasons = reason_df[
+    reason_df["이유"].fillna("").astype(str).str.strip() != ""
+].copy()
+
 st.caption(
-    f"총 {len(reason_df)}개의 평가 이유"
+    f"평가 응답 {len(reason_df)}개 · "
+    f"이유가 있는 응답 {len(valid_reasons)}개"
 )
 
 # ==========================================
-# 평가 이유 워드클라우드
+# 13. 워드클라우드
 # ==========================================
 
-st.subheader("☁️ 평가 이유 워드클라우드")
+st.markdown("### ☁️ 평가 이유 워드클라우드")
 
-# 분석에서 제외할 단어
-STOPWORDS = {
-    "그리고", "그러나", "하지만", "때문에",
-    "있어요", "있다", "없다", "같아요",
-    "생각합니다", "생각해요", "것", "수",
-    "이", "그", "저", "것은", "것이",
-    "서비스", "인공지능", "사용",
-    "있을", "없는", "대한", "위해"
-}
+if valid_reasons.empty:
 
-# 선택한 조와 평가 유형의 이유 수집
-texts = reason_df["이유"].fillna("").astype(str)
-
-words = []
-
-for text in texts:
-    # 한글과 영문 단어 추출
-    tokens = re.findall(r"[가-힣A-Za-z]{2,}", text)
-
-    for token in tokens:
-        if token not in STOPWORDS:
-            words.append(token)
-
-# 단어 빈도 계산
-frequencies = Counter(words)
-
-if not frequencies:
-    st.info("워드클라우드를 만들 평가 이유가 없습니다.")
-
-else:
-    try:
-        wc = WordCloud(
-            font_path="/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-            width=1000,
-            height=500,
-            background_color="white",
-            colormap="Pastel1",
-            max_words=40,
-            prefer_horizontal=0.9,
-            random_state=42
-        )
-
-        wc.generate_from_frequencies(frequencies)
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.imshow(wc, interpolation="bilinear")
-        ax.axis("off")
-
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-
-    except OSError:
-        st.error("한글 폰트를 찾지 못했습니다.")
-
-# 많이 등장한 단어 표시
-if frequencies:
-    st.caption("자주 등장한 단어 TOP 5")
-
-    top_words = frequencies.most_common(5)
-
-    st.write(
-        " · ".join(
-            f"{word} ({count}회)"
-            for word, count in top_words
-        )
+    st.info(
+        "선택한 조와 평가 유형에 작성된 "
+        "평가 이유가 없습니다."
     )
 
-# ------------------------------------------
-# 평가 이유 출력
-# ------------------------------------------
+else:
+
+    texts = valid_reasons["이유"].tolist()
+
+    # 단어 추출
+    frequencies = extract_words(texts)
+
+    # 단어 수 확인
+    st.caption(
+        f"분석된 단어 종류 : {len(frequencies)}개"
+    )
+
+    if not frequencies:
+
+        st.warning(
+            "평가 이유는 있지만 추출된 단어가 없습니다. "
+            "두 글자 이상의 단어가 있는지 확인해 주세요."
+        )
+
+    else:
+
+        make_wordcloud(frequencies)
+
+        # 자주 등장한 단어 표시
+        st.markdown("**🔎 자주 등장한 단어 TOP 10**")
+
+        top_words = frequencies.most_common(10)
+
+        st.write(
+            " · ".join(
+                f"{word} ({count}회)"
+                for word, count in top_words
+            )
+        )
+
+st.divider()
+
+# ==========================================
+# 14. 학생 평가 이유 목록
+# ==========================================
+
+st.markdown(
+    "### 📝 학생들의 평가 이유 자세히 보기"
+)
 
 if reason_df.empty:
 
     st.info(
-        "아직 작성된 평가 이유가 없습니다."
+        "표시할 평가 이유가 없습니다."
     )
 
 else:
@@ -692,15 +842,13 @@ else:
         reason = str(row["이유"]).strip()
         submitted = str(row["제출시간"])
 
-        # HTML 태그가 그대로 보이지 않도록
-        # Streamlit 기본 컨테이너 사용
         with st.container(border=True):
 
             st.markdown(
                 f"**{EMOJI[answer]} {answer}**"
             )
 
-            if reason and reason.lower() != "nan":
+            if reason:
                 st.write(reason)
 
             else:
@@ -714,8 +862,7 @@ else:
 
 st.markdown(
     '<div class="note">'
-    '🌷 새로고침 버튼을 누르면 '
-    '최신 평가 결과가 반영됩니다.'
+    '🌷 새로고침 버튼을 누르면 최신 결과가 반영됩니다.'
     '</div>',
     unsafe_allow_html=True
 )
