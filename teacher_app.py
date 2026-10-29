@@ -602,84 +602,60 @@ else:
 
 st.divider()
 
-# ------------------------------------------
+# ==========================================
 # 4. 학생들이 작성한 평가 이유
-# ------------------------------------------
+# ==========================================
 
 st.markdown(
-    '<div class="section-title">'
-    '💬 학생들이 작성한 평가 이유'
-    '</div>',
-    unsafe_allow_html=True
+    "### 💬 학생들이 작성한 평가 이유"
 )
 
+# 평가 유형 선택
 answer_filter = st.selectbox(
     "평가 유형",
     ["전체", "가능", "제한", "금지"],
     key="answer_filter"
 )
 
+# 선택한 유형에 따라 필터링
 if answer_filter == "전체":
-
-    reason_df = group_df
-
+    reason_df = group_df.copy()
 else:
-
     reason_df = group_df[
         group_df["평가"] == answer_filter
-    ]
+    ].copy()
 
 st.caption(
     f"총 {len(reason_df)}개의 평가 이유"
 )
 
+# 평가 이유 표시
 if reason_df.empty:
-
-    st.info(
-        "표시할 평가 이유가 없습니다."
-    )
+    st.info("아직 작성된 평가 이유가 없습니다.")
 
 else:
-
     for _, row in reason_df.iterrows():
 
-        answer = row["평가"]
+        answer = str(row["평가"])
+        reason = str(row["이유"]).strip()
+        submitted = str(row["제출시간"])
 
-        reason = escape(
-            str(row["이유"])
-        )
+        with st.container(border=True):
 
-        submitted = escape(
-            str(row["제출시간"])
-        )
+            st.markdown(
+                f"**{EMOJI[answer]} {answer}**"
+            )
 
-        st.markdown(
-            f"""
-            <div class="reason-card">
-                <b>
-                    {EMOJI[answer]} {answer}
-                </b>
+            if reason and reason.lower() != "nan":
+                st.write(reason)
+            else:
+                st.warning("평가 이유가 비어 있습니다.")
 
-                <div class="reason-content">
-                    {reason}
-                </div>
-
-                <div style="
-                    color:#999;
-                    font-size:12px;
-                    margin-top:10px;
-                ">
-                    {submitted}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+            st.caption(f"🕒 제출 시간 : {submitted}")
 
 st.markdown(
     '<div class="note">'
-    '🌷 새로고침 버튼을 누르면 '
-    '최신 평가 결과가 반영됩니다.'
+    '🌷 새로고침 버튼을 누르면 최신 평가 결과가 반영됩니다.'
     '</div>',
     unsafe_allow_html=True
 )
