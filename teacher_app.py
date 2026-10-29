@@ -4,7 +4,8 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 import hmac
-from html import escape
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # ==========================================
 # 1. 기본 설정
@@ -57,7 +58,6 @@ html, body, button, input, p,
     padding-bottom: 3rem;
 }
 
-/* 제목 */
 .main-title {
     font-size: 2.3rem;
     font-weight: bold;
@@ -92,12 +92,6 @@ div.stFormSubmitButton > button {
     font-weight: bold;
 }
 
-div.stButton > button:hover,
-div.stFormSubmitButton > button:hover {
-    background: #decbfa;
-    border-color: #b9a4db;
-}
-
 /* 새로고침 버튼 */
 .st-key-refresh_button button {
     background: #d5edff !important;
@@ -107,7 +101,7 @@ div.stFormSubmitButton > button:hover {
     font-size: 18px !important;
 }
 
-/* 평가 현황 카드 */
+/* 평가 통계 카드 */
 .stat {
     border-radius: 18px;
     padding: 20px;
@@ -136,28 +130,16 @@ div.stFormSubmitButton > button:hover {
     color: #9b485b;
 }
 
-/* 학생 평가 이유 */
-.reason-card {
-    background: white;
-    border: 2px solid #eedced;
-    border-radius: 17px;
-    padding: 18px;
-    margin: 12px 0;
-    color: #65596d;
-    line-height: 1.8;
-    overflow-wrap: anywhere;
-}
-
-.reason-content {
-    margin-top: 8px;
-    white-space: pre-wrap;
-}
-
 .note {
     text-align: center;
     color: #95899a;
     font-size: 14px;
     margin: 15px;
+}
+
+/* 평가 이유 카드 */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 16px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -183,19 +165,22 @@ if "load_error" not in st.session_state:
 # ==========================================
 
 def load_results():
-    """Apps Script에서 평가 결과 가져오기"""
+    """Apps Script로 평가 결과 조회"""
+
+    payload = {
+        "action": "read",
+        "password": st.secrets["teacher_password"]
+    }
 
     response = requests.post(
         st.secrets["apps_script_url"],
-        json={
-            "action": "read",
-            "password": st.secrets["teacher_password"]
-        },
-        timeout=(4, 12),
+        json=payload,
+        timeout=(4, 15),
         allow_redirects=True
     )
 
     response.raise_for_status()
+
     data = response.json()
 
     if not data.get("ok"):
@@ -219,20 +204,19 @@ def load_results():
     if df.empty:
         return df
 
-    # 평가조 숫자 변환
+    # 데이터 형식 확인
     df["평가조"] = pd.to_numeric(
         df["평가조"],
         errors="coerce"
     )
 
-    # 유효한 평가만 추출
+    # 정상 평가만 추출
     df = df[
         df["평가조"].isin(GROUPS)
         & df["평가"].isin(ANSWERS)
     ].copy()
 
-    # 같은 참여 ID가 같은 조를 여러 번
-    # 평가했다면 마지막 응답만 사용
+    # 중복 응답 방지
     df = df.drop_duplicates(
         subset=["참여ID", "평가조"],
         keep="last"
@@ -242,10 +226,7 @@ def load_results():
 
 
 def refresh_results():
-    """버튼을 눌렀을 때만 최신 데이터 조회"""
-
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+    """Google Sheets 데이터를 수동으로 다시 조회"""
 
     try:
         df = load_results()
@@ -261,19 +242,17 @@ def refresh_results():
         st.session_state.load_error = ""
 
     except Exception:
-        # 기존 데이터는 유지
+        # 오류가 나면 기존 결과 유지
         st.session_state.load_error = (
-            "최신 평가 결과를 불러오지 못했습니다. "
+            "평가 결과를 불러오지 못했습니다. "
             "잠시 후 다시 시도해 주세요."
         )
 
-
 # ==========================================
-# 5. 로그인
+# 5. 교사용 로그인
 # ==========================================
 
 def login(password):
-
     correct = st.secrets["teacher_password"]
 
     return hmac.compare_digest(
@@ -283,7 +262,6 @@ def login(password):
 
 
 def logout():
-
     st.session_state.authenticated = False
     st.session_state.results_data = None
     st.session_state.last_updated = None
@@ -306,7 +284,9 @@ if not st.session_state.authenticated:
         unsafe_allow_html=True
     )
 
-    left, center, right = st.columns([1, 2, 1])
+    left, center, right = st.columns(
+        [1, 2, 1]
+    )
 
     with center:
 
@@ -327,7 +307,7 @@ if not st.session_state.authenticated:
             if login(password):
                 st.session_state.authenticated = True
 
-                # 로그인 직후 최초 1회 데이터 조회
+                # 최초 로그인할 때 한 번 조회
                 with st.spinner(
                     "🌷 평가 결과를 불러오고 있어요..."
                 ):
@@ -341,7 +321,6 @@ if not st.session_state.authenticated:
                 )
 
     st.stop()
-
 
 # ==========================================
 # 6. 교사용 메인 화면
@@ -360,10 +339,6 @@ st.markdown(
     '</div>',
     unsafe_allow_html=True
 )
-
-# ------------------------------------------
-# 조 선택 및 로그아웃
-# ------------------------------------------
 
 left, right = st.columns([5, 1])
 
@@ -391,10 +366,8 @@ with right:
 st.write("")
 
 # ==========================================
-# 7. 수동 새로고침 버튼
+# 7. 수동 새로고침
 # ==========================================
-
-# 자동 갱신 기능은 사용하지 않음
 
 if st.button(
     "🔄 평가 결과 새로고침",
@@ -407,15 +380,10 @@ if st.button(
     ):
         refresh_results()
 
-# 데이터 조회 오류 안내
 if st.session_state.load_error:
-    st.error(
-        st.session_state.load_error
-    )
+    st.error(st.session_state.load_error)
 
-# 마지막 업데이트 시간 표시
 if st.session_state.last_updated:
-
     st.caption(
         "마지막 데이터 조회 : "
         f"{st.session_state.last_updated}"
@@ -427,7 +395,6 @@ st.divider()
 # 8. 평가 결과 대시보드
 # ==========================================
 
-# 최초 조회에 실패했다면 안내
 if st.session_state.results_data is None:
 
     st.info(
@@ -437,8 +404,7 @@ if st.session_state.results_data is None:
 
     st.stop()
 
-# 저장해 둔 데이터 사용
-# 조 선택, 필터 변경 시에는 다시 통신하지 않음
+# 저장된 데이터를 사용
 df = st.session_state.results_data
 
 group_df = df[
@@ -455,7 +421,7 @@ counts = {
 }
 
 # ------------------------------------------
-# 1. 현재 평가 참여 인원
+# 1. 조별 평가 현황
 # ------------------------------------------
 
 st.markdown(
@@ -523,12 +489,12 @@ if total == 0:
 else:
 
     labels = [
-        a for a in ANSWERS
-        if counts[a] > 0
+        answer for answer in ANSWERS
+        if counts[answer] > 0
     ]
 
     values = [
-        counts[a] for a in labels
+        counts[answer] for answer in labels
     ]
 
     fig = go.Figure(
@@ -540,7 +506,8 @@ else:
 
             marker=dict(
                 colors=[
-                    COLORS[a] for a in labels
+                    COLORS[answer]
+                    for answer in labels
                 ],
                 line=dict(
                     color="white",
@@ -603,24 +570,26 @@ else:
 st.divider()
 
 # ==========================================
-# 4. 학생들이 작성한 평가 이유
+# 9. 학생 평가 이유
 # ==========================================
 
 st.markdown(
     "### 💬 학생들이 작성한 평가 이유"
 )
 
-# 평가 유형 선택
+# 평가 유형 필터
 answer_filter = st.selectbox(
     "평가 유형",
     ["전체", "가능", "제한", "금지"],
     key="answer_filter"
 )
 
-# 선택한 유형에 따라 필터링
 if answer_filter == "전체":
+
     reason_df = group_df.copy()
+
 else:
+
     reason_df = group_df[
         group_df["평가"] == answer_filter
     ].copy()
@@ -629,17 +598,26 @@ st.caption(
     f"총 {len(reason_df)}개의 평가 이유"
 )
 
-# 평가 이유 표시
+# ------------------------------------------
+# 평가 이유 출력
+# ------------------------------------------
+
 if reason_df.empty:
-    st.info("아직 작성된 평가 이유가 없습니다.")
+
+    st.info(
+        "아직 작성된 평가 이유가 없습니다."
+    )
 
 else:
+
     for _, row in reason_df.iterrows():
 
         answer = str(row["평가"])
         reason = str(row["이유"]).strip()
         submitted = str(row["제출시간"])
 
+        # HTML 태그가 그대로 보이지 않도록
+        # Streamlit 기본 컨테이너 사용
         with st.container(border=True):
 
             st.markdown(
@@ -648,14 +626,20 @@ else:
 
             if reason and reason.lower() != "nan":
                 st.write(reason)
-            else:
-                st.warning("평가 이유가 비어 있습니다.")
 
-            st.caption(f"🕒 제출 시간 : {submitted}")
+            else:
+                st.warning(
+                    "평가 이유가 비어 있습니다."
+                )
+
+            st.caption(
+                f"🕒 제출 시간 : {submitted}"
+            )
 
 st.markdown(
     '<div class="note">'
-    '🌷 새로고침 버튼을 누르면 최신 평가 결과가 반영됩니다.'
+    '🌷 새로고침 버튼을 누르면 '
+    '최신 평가 결과가 반영됩니다.'
     '</div>',
     unsafe_allow_html=True
 )
