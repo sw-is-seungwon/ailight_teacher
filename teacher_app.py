@@ -1,4 +1,7 @@
-
+import re
+from collections import Counter
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
 import streamlit as st
 import requests
 import pandas as pd
@@ -597,6 +600,79 @@ else:
 st.caption(
     f"총 {len(reason_df)}개의 평가 이유"
 )
+
+# ==========================================
+# 평가 이유 워드클라우드
+# ==========================================
+
+st.subheader("☁️ 평가 이유 워드클라우드")
+
+# 분석에서 제외할 단어
+STOPWORDS = {
+    "그리고", "그러나", "하지만", "때문에",
+    "있어요", "있다", "없다", "같아요",
+    "생각합니다", "생각해요", "것", "수",
+    "이", "그", "저", "것은", "것이",
+    "서비스", "인공지능", "사용",
+    "있을", "없는", "대한", "위해"
+}
+
+# 선택한 조와 평가 유형의 이유 수집
+texts = reason_df["이유"].fillna("").astype(str)
+
+words = []
+
+for text in texts:
+    # 한글과 영문 단어 추출
+    tokens = re.findall(r"[가-힣A-Za-z]{2,}", text)
+
+    for token in tokens:
+        if token not in STOPWORDS:
+            words.append(token)
+
+# 단어 빈도 계산
+frequencies = Counter(words)
+
+if not frequencies:
+    st.info("워드클라우드를 만들 평가 이유가 없습니다.")
+
+else:
+    try:
+        wc = WordCloud(
+            font_path="/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+            width=1000,
+            height=500,
+            background_color="white",
+            colormap="Pastel1",
+            max_words=40,
+            prefer_horizontal=0.9,
+            random_state=42
+        )
+
+        wc.generate_from_frequencies(frequencies)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.imshow(wc, interpolation="bilinear")
+        ax.axis("off")
+
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    except OSError:
+        st.error("한글 폰트를 찾지 못했습니다.")
+
+# 많이 등장한 단어 표시
+if frequencies:
+    st.caption("자주 등장한 단어 TOP 5")
+
+    top_words = frequencies.most_common(5)
+
+    st.write(
+        " · ".join(
+            f"{word} ({count}회)"
+            for word, count in top_words
+        )
+    )
 
 # ------------------------------------------
 # 평가 이유 출력
