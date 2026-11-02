@@ -1,17 +1,17 @@
 
-import streamlit as st
-import requests
-import pandas as pd
-import plotly.graph_objects as go
 import hmac
 import re
 from collections import Counter
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+from wordcloud import WordCloud
 
 # ==========================================
 # 1. 기본 설정
@@ -23,7 +23,11 @@ st.set_page_config(
     layout="wide"
 )
 
-GROUPS = [1, 2, 3, 4]
+CLASSES = {
+    "A": {"label": "A분반", "groups": 4},
+    "B": {"label": "B분반", "groups": 5}
+}
+
 ANSWERS = ["가능", "제한", "금지"]
 
 COLORS = {
@@ -37,6 +41,14 @@ EMOJI = {
     "제한": "🟡",
     "금지": "🔴"
 }
+
+COLUMNS = [
+    "제출시간",
+    "참여ID",
+    "평가조",
+    "평가",
+    "이유"
+]
 
 # ==========================================
 # 2. 디자인
@@ -85,6 +97,7 @@ html, body, button, input, p, textarea,
     margin: 20px 0;
 }
 
+/* 버튼 */
 div.stButton > button,
 div.stFormSubmitButton > button {
     font-family: 'Gowun Dodum', sans-serif !important;
@@ -97,6 +110,7 @@ div.stFormSubmitButton > button {
     font-weight: bold;
 }
 
+/* 수동 새로고침 버튼 */
 .st-key-refresh_button button {
     background: #d5edff !important;
     color: #4c6b92 !important;
@@ -105,6 +119,7 @@ div.stFormSubmitButton > button {
     font-size: 18px !important;
 }
 
+/* 평가 통계 */
 .stat {
     border-radius: 18px;
     padding: 20px;
@@ -139,14 +154,6 @@ div.stFormSubmitButton > button {
     font-size: 14px;
     margin: 15px;
 }
-
-.wordcloud-area {
-    background: #ffffff;
-    border: 2px solid #eedced;
-    border-radius: 20px;
-    padding: 12px;
-    margin: 15px 0;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -154,26 +161,31 @@ div.stFormSubmitButton > button {
 # 3. 세션 상태
 # ==========================================
 
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+defaults = {
+    "authenticated": False,
+    "selected_class_teacher": "A",
+    "selected_group": 1,
+    "results_cache": {},
+    "updated_cache": {},
+    "load_error": ""
+}
 
-if "results_data" not in st.session_state:
-    st.session_state.results_data = None
-
-if "last_updated" not in st.session_state:
-    st.session_state.last_updated = None
-
-if "load_error" not in st.session_state:
-    st.session_state.load_error = ""
+for key, default in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # ==========================================
-# 4. Google Sheets 조회
+# 4. Google Sheets 결과 조회
 # ==========================================
 
-def load_results():
+def load_results(class_id):
+    """
+    선택한 분반의 평가 결과만 조회
+    """
 
     payload = {
         "action": "read",
+        "class_id": class_id,
         "password": st.secrets["teacher_password"]
     }
 
@@ -193,22 +205,15 @@ def load_results():
             data.get("message", "조회 실패")
         )
 
-    columns = [
-        "제출시간",
-        "참여ID",
-        "평가조",
-        "평가",
-        "이유"
-    ]
-
     df = pd.DataFrame(
         data.get("results", []),
-        columns=columns
+        columns=COLUMNS
     )
 
     if df.empty:
         return df
 
+    # 조 번호 숫자로 변환
     df["평가조"] = pd.to_numeric(
         df["평가조"],
         errors="coerce"
@@ -228,11 +233,17 @@ def load_results():
         .str.strip()
     )
 
+    # 분반에 해당하는 조만 추출
+    total_groups = CLASSES[class_id]["groups"]
+
     df = df[
-        df["평가조"].isin(GROUPS)
+        df["평가조"].isin(
+            range(1, total_groups + 1)
+        )
         & df["평가"].isin(ANSWERS)
     ].copy()
 
+    # 중복 응답 제거
     df = df.drop_duplicates(
         subset=["참여ID", "평가조"],
         keep="last"
@@ -241,14 +252,17 @@ def load_results():
     return df
 
 
-def refresh_results():
+def refresh_results(class_id):
+    """
+    선택한 분반 데이터 수동 새로고침
+    """
 
     try:
-        df = load_results()
+        df = load_results(class_id)
 
-        st.session_state.results_data = df
+        st.session_state.results_cache[class_id] = df
 
-        st.session_state.last_updated = (
+        st.session_state.updated_cache[class_id] = (
             datetime.now(
                 ZoneInfo("Asia/Seoul")
             ).strftime("%H:%M:%S")
@@ -256,141 +270,163 @@ def refresh_results():
 
         st.session_state.load_error = ""
 
-    except Exception as e:
-
+    except Exception as error:
         st.session_state.load_error = (
-            "평가 결과를 불러오지 못했습니다. "
-            f"오류: {e}"
+            f"결과 조회 실패: {error}"
         )
 
+
+def logout():
+    st.session_state.authenticated = False
+    st.session_state.results_cache = {}
+    st.session_state.updated_cache = {}
+    st.session_state.load_error = ""
+
 # ==========================================
-# 5. 워드클라우드 함수
+# 5. 워드클라우드 설정
 # ==========================================
 
-# 한글 분석에 적합하지 않은 일반 표현 제거
 STOPWORDS = {
     "그리고", "그러나", "하지만",
     "그래서", "때문에", "따라서",
-    "있어요", "있습니다", "없어요",
-    "없습니다", "있다", "없다",
-    "같아요", "같습니다", "생각합니다",
-    "생각해요", "것이다", "것을",
-    "것은", "것이", "저는", "제가",
+    "있어요", "있습니다",
+    "없어요", "없습니다",
+    "있다", "없다",
+    "같아요", "같습니다",
+    "생각합니다", "생각해요",
+    "것이다", "것을", "것은", "것이",
+    "저는", "제가",
     "너무", "정말", "매우",
-    "조금", "많이", "위해",
-    "대한", "이러한", "그러한",
+    "조금", "많이",
+    "위해", "대한",
+    "이러한", "그러한",
     "서비스", "인공지능",
     "사용할", "사용하는", "사용하고",
     "있을", "없는", "하는",
     "있기", "때문", "한다",
     "된다", "해야", "같은",
-    "그리고", "이것", "저것"
+    "이것", "저것"
 }
 
-# 자주 등장하는 표현 통합
 WORD_REPLACE = {
     "개인정보가": "개인정보",
     "개인정보를": "개인정보",
     "개인정보의": "개인정보",
+
     "안전성이": "안전성",
     "안전성을": "안전성",
+
     "정확성이": "정확성",
     "정확성을": "정확성",
+
     "공정성이": "공정성",
     "공정성을": "공정성",
+
     "신뢰성이": "신뢰성",
     "신뢰성을": "신뢰성",
+
     "편리해서": "편리함",
     "편리하고": "편리함",
     "편리하다": "편리함",
+
     "위험해서": "위험",
     "위험하다": "위험",
+
     "보완해야": "보완",
     "보완하면": "보완",
+
     "오류가": "오류",
     "오류를": "오류"
 }
 
 
 def extract_words(texts):
-    """학생 평가 이유에서 단어 추출"""
+    """
+    평가 이유에서 단어 추출
+    """
 
     words = []
 
     for text in texts:
 
-        text = str(text).strip()
-
-        # 한글, 영어, 숫자 중 두 글자 이상의 단어
         tokens = re.findall(
             r"[가-힣A-Za-z0-9]{2,}",
-            text
+            str(text)
         )
 
         for token in tokens:
 
             token = token.lower()
 
-            # 표현 통합
             token = WORD_REPLACE.get(
                 token, token
             )
 
-            if token in STOPWORDS:
-                continue
-
-            words.append(token)
+            if token not in STOPWORDS:
+                words.append(token)
 
     return Counter(words)
 
 
-def find_korean_font():
-    """Streamlit 서버에서 한글 폰트 찾기"""
+@st.cache_data(show_spinner=False)
+def korean_font_path():
+    """
+    한글 폰트 경로 탐색
+    """
 
     candidates = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
         "C:/Windows/Fonts/malgun.ttf"
     ]
 
-    for path in candidates:
-        if Path(path).is_file():
-            return path
+    for candidate in candidates:
+        if Path(candidate).is_file():
+            return candidate
 
-    # 설치 위치가 다른 경우 검색
     font_root = Path("/usr/share/fonts")
 
     if font_root.exists():
-        for pattern in [
+
+        patterns = [
             "**/NanumGothic.ttf",
             "**/NanumBarunGothic.ttf",
             "**/NotoSansCJK-Regular.ttc"
-        ]:
-            matches = list(
-                font_root.glob(pattern)
+        ]
+
+        for pattern in patterns:
+
+            found = next(
+                font_root.glob(pattern),
+                None
             )
 
-            if matches:
-                return str(matches[0])
+            if found is not None:
+                return str(found)
 
     return None
 
 
-def make_wordcloud(frequencies):
+def show_wordcloud(frequencies):
+    """
+    평가 이유 워드클라우드 출력
+    """
 
-    font_path = find_korean_font()
+    font_path = korean_font_path()
 
-    if font_path is None:
+    if not font_path:
+
         st.warning(
-            "한글 폰트가 설치되어 있지 않습니다. "
-            "GitHub에 packages.txt 파일을 추가하고 "
-            "fonts-nanum을 입력해 주세요."
+            "한글 폰트가 없습니다. "
+            "교사용 저장소의 packages.txt에 "
+            "fonts-nanum을 추가해 주세요."
         )
+
         return
 
     try:
+
         wc = WordCloud(
             font_path=font_path,
             width=1100,
@@ -419,7 +455,9 @@ def make_wordcloud(frequencies):
 
         ax.axis("off")
 
-        fig.patch.set_facecolor("#fffaff")
+        fig.patch.set_facecolor(
+            "#fffaff"
+        )
 
         st.pyplot(
             fig,
@@ -428,32 +466,15 @@ def make_wordcloud(frequencies):
 
         plt.close(fig)
 
-    except Exception as e:
+    except Exception as error:
+
         st.error(
-            "워드클라우드 생성 중 오류가 발생했습니다."
+            f"워드클라우드 생성 실패: {error}"
         )
-        st.caption(str(e))
-
 
 # ==========================================
-# 6. 로그인
+# 6. 교사용 로그인
 # ==========================================
-
-def login(password):
-
-    return hmac.compare_digest(
-        password,
-        st.secrets["teacher_password"]
-    )
-
-
-def logout():
-
-    st.session_state.authenticated = False
-    st.session_state.results_data = None
-    st.session_state.last_updated = None
-    st.session_state.load_error = ""
-
 
 if not st.session_state.authenticated:
 
@@ -471,7 +492,9 @@ if not st.session_state.authenticated:
         unsafe_allow_html=True
     )
 
-    left, center, right = st.columns([1, 2, 1])
+    left, center, right = st.columns(
+        [1, 2, 1]
+    )
 
     with center:
 
@@ -489,18 +512,28 @@ if not st.session_state.authenticated:
 
         if submitted:
 
-            if login(password):
+            correct_password = (
+                st.secrets["teacher_password"]
+            )
+
+            if hmac.compare_digest(
+                password,
+                correct_password
+            ):
 
                 st.session_state.authenticated = True
 
                 with st.spinner(
                     "🌷 평가 결과를 불러오고 있어요..."
                 ):
-                    refresh_results()
+                    refresh_results(
+                        st.session_state.selected_class_teacher
+                    )
 
                 st.rerun()
 
             else:
+
                 st.error(
                     "비밀번호가 올바르지 않습니다."
                 )
@@ -508,7 +541,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ==========================================
-# 7. 메인 화면
+# 7. 교사용 메인 화면
 # ==========================================
 
 st.markdown(
@@ -520,24 +553,26 @@ st.markdown(
 
 st.markdown(
     '<div class="subtitle">'
-    '학생들의 신호등 평가 결과를 확인해 보세요. 🌷'
+    '분반별로 평가 결과를 확인해 보세요. 🌷'
     '</div>',
     unsafe_allow_html=True
 )
 
-left, right = st.columns([5, 1])
+header_left, header_right = st.columns(
+    [5, 1]
+)
 
-with left:
+with header_left:
 
-    selected_group = st.radio(
-        "결과를 확인할 조",
-        GROUPS,
-        format_func=lambda x: f"{x}조",
+    class_id = st.radio(
+        "분반 선택",
+        options=list(CLASSES),
+        format_func=lambda c: CLASSES[c]["label"],
         horizontal=True,
-        key="selected_group"
+        key="selected_class_teacher"
     )
 
-with right:
+with header_right:
 
     st.write("")
 
@@ -548,10 +583,29 @@ with right:
         logout()
         st.rerun()
 
-st.write("")
+# ==========================================
+# 8. 평가 조 선택
+# ==========================================
+
+total_groups = CLASSES[class_id]["groups"]
+
+# 분반 변경 시 5조 -> 4조처럼
+# 선택 범위가 달라질 수 있으므로 보정
+if st.session_state.selected_group > total_groups:
+    st.session_state.selected_group = 1
+
+selected_group = st.radio(
+    "평가 조 선택",
+    options=list(
+        range(1, total_groups + 1)
+    ),
+    format_func=lambda n: f"{n}조",
+    horizontal=True,
+    key="selected_group"
+)
 
 # ==========================================
-# 8. 수동 새로고침
+# 9. 수동 새로고침
 # ==========================================
 
 if st.button(
@@ -563,32 +617,38 @@ if st.button(
     with st.spinner(
         "🌷 최신 평가 결과를 불러오고 있어요..."
     ):
-        refresh_results()
+
+        refresh_results(class_id)
 
 if st.session_state.load_error:
     st.error(st.session_state.load_error)
 
-if st.session_state.last_updated:
+last_updated = (
+    st.session_state.updated_cache.get(class_id)
+)
+
+if last_updated:
+
     st.caption(
-        "마지막 데이터 조회 : "
-        f"{st.session_state.last_updated}"
+        f"{CLASSES[class_id]['label']} "
+        f"마지막 데이터 조회 : {last_updated}"
     )
 
-st.divider()
-
-# ==========================================
-# 9. 평가 결과 집계
-# ==========================================
-
-if st.session_state.results_data is None:
+# 처음 선택한 분반은 새로고침 필요
+if class_id not in st.session_state.results_cache:
 
     st.info(
-        "데이터가 없습니다. 새로고침 버튼을 눌러 주세요."
+        f"{CLASSES[class_id]['label']}의 결과를 보려면 "
+        "'평가 결과 새로고침'을 눌러 주세요."
     )
 
     st.stop()
 
-df = st.session_state.results_data
+# ==========================================
+# 10. 평가 결과 집계
+# ==========================================
+
+df = st.session_state.results_cache[class_id]
 
 group_df = df[
     df["평가조"] == selected_group
@@ -603,9 +663,12 @@ counts = {
     for answer in ANSWERS
 }
 
+st.divider()
+
 st.markdown(
     f'<div class="section-title">'
-    f'🌼 {selected_group}조 평가 현황'
+    f'🌼 {CLASSES[class_id]["label"]} · '
+    f'{selected_group}조 평가 현황'
     f'</div>',
     unsafe_allow_html=True
 )
@@ -616,7 +679,7 @@ st.metric(
 )
 
 # ==========================================
-# 10. 가능 / 제한 / 금지
+# 11. 가능 / 제한 / 금지 통계 카드
 # ==========================================
 
 cols = st.columns(3)
@@ -628,7 +691,9 @@ css_names = [
 ]
 
 for col, answer, css_name in zip(
-    cols, ANSWERS, css_names
+    cols,
+    ANSWERS,
+    css_names
 ):
 
     number = counts[answer]
@@ -656,7 +721,7 @@ for col, answer, css_name in zip(
 st.write("")
 
 # ==========================================
-# 11. 원그래프
+# 12. 원그래프
 # ==========================================
 
 if total == 0:
@@ -668,12 +733,14 @@ if total == 0:
 else:
 
     labels = [
-        a for a in ANSWERS
-        if counts[a] > 0
+        answer
+        for answer in ANSWERS
+        if counts[answer] > 0
     ]
 
     values = [
-        counts[a] for a in labels
+        counts[answer]
+        for answer in labels
     ]
 
     fig = go.Figure(
@@ -682,17 +749,21 @@ else:
             values=values,
             hole=0.4,
             sort=False,
+
             marker=dict(
                 colors=[
-                    COLORS[a] for a in labels
+                    COLORS[answer]
+                    for answer in labels
                 ],
                 line=dict(
                     color="white",
                     width=3
                 )
             ),
+
             textinfo="label+percent",
             textfont=dict(size=17),
+
             hovertemplate=(
                 "%{label}: %{value}명"
                 "<extra></extra>"
@@ -701,25 +772,31 @@ else:
     )
 
     fig.update_layout(
+
         title=dict(
             text=f"{selected_group}조 신호등 평가 비율",
             x=0.5
         ),
+
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
+
         height=420,
+
         margin=dict(
             l=20,
             r=20,
             t=60,
             b=20
         ),
+
         annotations=[
             dict(
                 text=f"{total}명",
                 x=0.5,
                 y=0.5,
                 showarrow=False,
+
                 font=dict(
                     size=24,
                     color="#65536d"
@@ -731,13 +808,15 @@ else:
     st.plotly_chart(
         fig,
         use_container_width=True,
-        config={"displayModeBar": False}
+        config={
+            "displayModeBar": False
+        }
     )
 
 st.divider()
 
 # ==========================================
-# 12. 평가 이유 필터
+# 13. 평가 이유 필터
 # ==========================================
 
 st.markdown(
@@ -760,9 +839,12 @@ else:
         group_df["평가"] == answer_filter
     ].copy()
 
-# 실제 문장이 있는 응답만 추출
+# 실제 이유가 작성된 응답만 추출
 valid_reasons = reason_df[
-    reason_df["이유"].fillna("").astype(str).str.strip() != ""
+    reason_df["이유"]
+    .fillna("")
+    .astype(str)
+    .str.strip() != ""
 ].copy()
 
 st.caption(
@@ -771,26 +853,26 @@ st.caption(
 )
 
 # ==========================================
-# 13. 워드클라우드
+# 14. 워드클라우드
 # ==========================================
 
-st.markdown("### ☁️ 평가 이유 워드클라우드")
+st.markdown(
+    "### ☁️ 평가 이유 워드클라우드"
+)
 
 if valid_reasons.empty:
 
     st.info(
-        "선택한 조와 평가 유형에 작성된 "
-        "평가 이유가 없습니다."
+        "선택한 분반·조·평가 유형에는 "
+        "작성된 평가 이유가 없습니다."
     )
 
 else:
 
-    texts = valid_reasons["이유"].tolist()
+    frequencies = extract_words(
+        valid_reasons["이유"].tolist()
+    )
 
-    # 단어 추출
-    frequencies = extract_words(texts)
-
-    # 단어 수 확인
     st.caption(
         f"분석된 단어 종류 : {len(frequencies)}개"
     )
@@ -798,30 +880,30 @@ else:
     if not frequencies:
 
         st.warning(
-            "평가 이유는 있지만 추출된 단어가 없습니다. "
-            "두 글자 이상의 단어가 있는지 확인해 주세요."
+            "평가 이유는 있지만, "
+            "두 글자 이상인 분석 대상 단어가 없습니다."
         )
 
     else:
 
-        make_wordcloud(frequencies)
+        show_wordcloud(frequencies)
 
-        # 자주 등장한 단어 표시
-        st.markdown("**🔎 자주 등장한 단어 TOP 10**")
-
-        top_words = frequencies.most_common(10)
+        st.markdown(
+            "**🔎 자주 등장한 단어 TOP 10**"
+        )
 
         st.write(
             " · ".join(
                 f"{word} ({count}회)"
-                for word, count in top_words
+                for word, count
+                in frequencies.most_common(10)
             )
         )
 
 st.divider()
 
 # ==========================================
-# 14. 학생 평가 이유 목록
+# 15. 학생 평가 이유 목록
 # ==========================================
 
 st.markdown(
@@ -840,7 +922,6 @@ else:
 
         answer = str(row["평가"])
         reason = str(row["이유"]).strip()
-        submitted = str(row["제출시간"])
 
         with st.container(border=True):
 
@@ -857,12 +938,13 @@ else:
                 )
 
             st.caption(
-                f"🕒 제출 시간 : {submitted}"
+                f'🕒 제출 시간 : {row["제출시간"]}'
             )
 
 st.markdown(
     '<div class="note">'
-    '🌷 새로고침 버튼을 누르면 최신 결과가 반영됩니다.'
+    '🌷 새로고침 버튼을 누르면 '
+    '선택한 분반의 최신 결과가 반영됩니다.'
     '</div>',
     unsafe_allow_html=True
 )
