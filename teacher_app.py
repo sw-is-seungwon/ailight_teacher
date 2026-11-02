@@ -24,8 +24,8 @@ st.set_page_config(
 )
 
 CLASSES = {
-    "A": {"label": "A분반", "groups": 4},
-    "B": {"label": "B분반", "groups": 5}
+    "A": {"label": "205", "groups": 4},
+    "B": {"label": "206", "groups": 5}
 }
 
 ANSWERS = ["가능", "제한", "금지"]
